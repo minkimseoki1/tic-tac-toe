@@ -1,10 +1,11 @@
 import os
 import sys
 import json
+import smtplib
 import feedparser
 import anthropic
-from slack_sdk import WebClient
-from slack_sdk.errors import SlackApiError
+from email.mime.multipart import MIMEMultipart
+from email.mime.text import MIMEText
 from datetime import datetime, timezone, timedelta
 from dotenv import load_dotenv
 
@@ -103,25 +104,38 @@ Do NOT fabricate articles. Only use what was provided. If a category has no arti
     return response.content[0].text
 
 
-def send_to_slack(newsletter_text: str):
-    token = os.environ["SLACK_BOT_TOKEN"]
-    user_id = os.environ["SLACK_USER_ID"]
+def markdown_to_html(text: str) -> str:
+    import re
+    text = re.sub(r'\*\*(.+?)\*\*', r'<strong>\1</strong>', text)
+    text = re.sub(r'\*(.+?)\*', r'<em>\1</em>', text)
+    text = re.sub(r'## (.+)', r'<h2>\1</h2>', text)
+    text = re.sub(r'# (.+)', r'<h1>\1</h1>', text)
+    text = re.sub(r'^- (.+)', r'<li>\1</li>', text, flags=re.MULTILINE)
+    text = re.sub(r'\[(.+?)\]\((.+?)\)', r'<a href="\2">\1</a>', text)
+    text = text.replace('\n---\n', '<hr>')
+    text = re.sub(r'\n{2,}', '</p><p>', text)
+    return f'<div style="font-family:sans-serif;max-width:680px;margin:auto;line-height:1.6"><p>{text}</p></div>'
 
-    client = WebClient(token=token)
 
-    dm = client.conversations_open(users=user_id)
-    channel_id = dm["channel"]["id"]
+def send_email(newsletter_text: str):
+    sender = os.environ["EMAIL_ADDRESS"]
+    password = os.environ["EMAIL_APP_PASSWORD"]
+    recipient = os.environ.get("EMAIL_TO", sender)
+    today_str = datetime.now(KST).strftime("%Y-%m-%d")
 
-    # Slack has a 3000-char limit per block; split if needed
-    chunks = [newsletter_text[i:i+2900] for i in range(0, len(newsletter_text), 2900)]
-    for i, chunk in enumerate(chunks):
-        client.chat_postMessage(
-            channel=channel_id,
-            text=chunk,
-            mrkdwn=True,
-        )
+    msg = MIMEMultipart("alternative")
+    msg["Subject"] = f"AI & Design Morning Brief — {today_str}"
+    msg["From"] = f"AI Newsletter <{sender}>"
+    msg["To"] = recipient
 
-    print(f"Newsletter sent to Slack DM ({user_id})")
+    msg.attach(MIMEText(newsletter_text, "plain", "utf-8"))
+    msg.attach(MIMEText(markdown_to_html(newsletter_text), "html", "utf-8"))
+
+    with smtplib.SMTP_SSL("smtp.gmail.com", 465) as server:
+        server.login(sender, password)
+        server.sendmail(sender, recipient, msg.as_string())
+
+    print(f"Newsletter sent to {recipient}")
 
 
 def main():
@@ -134,8 +148,8 @@ def main():
     print("Generating newsletter with Claude...")
     newsletter = generate_newsletter(articles)
 
-    print("Sending to Slack...")
-    send_to_slack(newsletter)
+    print("Sending email...")
+    send_email(newsletter)
 
     print("Done.")
 
